@@ -1,6 +1,7 @@
 using MPI
 using Random
-using BenchmarkTools
+using BenchmarkTools, TimerOutputs
+using Statistics
 
 struct SummaryStat{T}
     avg::T
@@ -31,55 +32,71 @@ function stats_reduction(S1::SummaryStat, S2::SummaryStat)
 end
 
 
-function mean_sum_reduction!(mean::T, arr::AbstractVector{T}) where T
+function mean_value_sum_reduction!(mean_value::AbstractVector{T}, arr::AbstractArray{T}) where T
 
-    size = MPI.Comm_size(MPI.COMM_WORLD)
-    sum = 0.0
-    MPI.Reduce!(arr, sum, +, 0, MPI.COMM_WORLD)
-    mean = sum/size
+    mean!(mean_value, arr)
+    MPI.Reduce!(mean_value, +, 0, MPI.COMM_WORLD)
+    if mpi_rank == 0
+        mean_value ./= mpi_size
+    end
     
 end
 
-function variance_custom_reduction(var::T, statistics, arr::AbstractVector{T}) where T
+function variance_double_sum_reduction!(variance::AbstractVector{T}, mean_value::AbstractVector{T}, arr::AbstractArray{T}) where T
 
-    statistics = SummaryStat(arr)
+    mean_value_sum_reduction!(mean_value, arr)
+    MPI.Bcast!(mean_value, 0, MPI.COMM_WORLD)
+    sum!(variance, (arr .- mean_value).^2)
+    MPI.Reduce!(variance, +, 0, MPI.COMM_WORLD)
+    if mpi_rank == 0
+        variance ./= (mpi_size * n - 1)
+    end
+
+end
+
+function variance_custom_reduction!(variance::AbstractVector{T}, statistics::AbstractVector{SummaryStat{T}}) where T
+
     MPI.Reduce!(statistics, stats_reduction, 0, MPI.COMM_WORLD)
+    for idx in CartesianIndices(statistics)
+        variance[idx] = statistics[idx].var
+    end
     
-end
-
-function variance_double_sum_reduction!(var::T, arr::AbstractVector{T}) where T
-
-    mean = 0.0
-    mean_sum_reduction!(mean, arr)
-    MPI.Bcast!(mean, 0, MPI.COMM_WORLD)
-    d = (arr - mean) ** 2
-    mean_sum_reduction!(var, d)
-    var =/ (size-1)
-
 end
 
 MPI.Init()
 mpi_size = MPI.Comm_size(MPI.COMM_WORLD)
 mpi_rank = MPI.Comm_rank(MPI.COMM_WORLD)
 
-N = 100000
+N = 1000000
+n = 10
 T = Float64
 
-statistics = Vector{SummaryStat{T}}(undef, N)
-Random.seed(123 + mpi_rank)
-arr = rand(T, N)
+Random.seed!(123 + mpi_rank)
 
-mean = floatmax(T)
-var1 = floatmax(T)
-var2 = floatmax(T)
+timer = TimerOutput()
 
-@btime mean_sum_reduction!(mean, arr)
-@btime variance_double_sum_reduction!(var1, arr)
-@btime variance_custom_reduction!(var2, arr)
+arr = rand(T, N, n)
+mean_value = Vector{Float64}(undef, N)
+var1 = Vector{Float64}(undef, N)
+var2 = Vector{Float64}(undef, N)
+stats = Vector{SummaryStat{Float64}}(undef, N)
+for idx in CartesianIndices(stats)
+    stats[idx] = SummaryStat(@view(arr[idx,:]))
+end
+
+
+for i in 1:10
+    @timeit timer "mean" mean_value_sum_reduction!(mean_value, arr)
+    @timeit timer "two pass var" variance_double_sum_reduction!(var1, mean_value, arr)
+    @timeit timer "one pass var" variance_custom_reduction!(var2, stats)
+end
 
 if mpi_rank == 0
+
     @show mpi_size
-    @show mean
-    @show var1
-    @show var2
+    @show median(mean_value)
+    @show median(var1)
+    @show median(var2)
+    
+    print_timer(timer)
 end

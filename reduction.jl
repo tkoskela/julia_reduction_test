@@ -42,11 +42,12 @@ function mean_value_sum_reduction!(mean_value::AbstractVector{T}, arr::AbstractA
     
 end
 
-function variance_double_sum_reduction!(variance::AbstractVector{T}, mean_value::AbstractVector{T}, arr::AbstractArray{T}) where T
+function variance_double_sum_reduction!(variance::AbstractVector{T}, mean_value::AbstractVector{T}, arr::AbstractArray{T}, buffer::AbstractArray{T}) where T
 
     mean_value_sum_reduction!(mean_value, arr)
     MPI.Bcast!(mean_value, 0, MPI.COMM_WORLD)
-    sum!(variance, (arr .- mean_value).^2)
+    buffer .= (arr .- mean_value).^2
+    sum!(variance, buffer)
     MPI.Reduce!(variance, +, 0, MPI.COMM_WORLD)
     if mpi_rank == 0
         variance ./= (mpi_size * n - 1)
@@ -76,6 +77,7 @@ Random.seed!(123 + mpi_rank)
 timer = TimerOutput()
 
 arr = rand(T, N, n)
+buf = Matrix{Float64}(undef, N, n)
 mean_value = Vector{Float64}(undef, N)
 var1 = Vector{Float64}(undef, N)
 var2 = Vector{Float64}(undef, N)
@@ -87,7 +89,7 @@ end
 
 for i in 1:10
     @timeit timer "mean" mean_value_sum_reduction!(mean_value, arr)
-    @timeit timer "two pass var" variance_double_sum_reduction!(var1, mean_value, arr)
+    @timeit timer "two pass var" variance_double_sum_reduction!(var1, mean_value, arr, buf)
     @timeit timer "one pass var" variance_custom_reduction!(var2, stats)
 end
 
